@@ -1,0 +1,12 @@
+[Icon Theme]
+Name=hicolor
+Comment=Icons shipped with gtk-wl-capture
+Directories=scalable/actions
+Hidden=true
+
+[scalable/actions]
+Size=16
+MinSize=8
+MaxSize=512
+Context=Actions
+Type=Scalable

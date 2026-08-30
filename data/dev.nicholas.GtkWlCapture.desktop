@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Screenshot
+GenericName=Screenshot Tool
+Comment=Capture the screen or a selection on Wayland
+Exec=gtk-wl-capture
+Icon=dev.nicholas.GtkWlCapture
+Terminal=false
+Categories=Graphics;
+Keywords=screenshot;capture;screen;selection;grab;clipboard;wayland;
+StartupNotify=true
+StartupWMClass=dev.nicholas.GtkWlCapture
