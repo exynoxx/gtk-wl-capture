@@ -49,7 +49,6 @@ var app: App   # single window, single capture at a time
 # --- settings --------------------------------------------------------------
 
 proc picturesDir(): string =
-  ## Never hardcode ~/Pictures: on this box it is ~/Billeder.
   result = getUserSpecialDir(UserDirectory.directoryPictures)
   if result.len == 0 or not dirExists(result):
     result = os.getHomeDir() / "Pictures"
@@ -137,8 +136,6 @@ proc onSaveResponse(d: FileChooserDialog; response: int) =
   gtk4.destroy(d)
 
 proc saveAs() =
-  ## GtkFileChooserDialog is deprecated in favour of GtkFileDialog, whose
-  ## gintro binding is raw-async only.
   let d = newFileChooserDialog("Save Screenshot", app.win, FileChooserAction.save)
   discard d.addButton("_Cancel", ResponseType.cancel.ord)
   discard d.addButton("_Save", ResponseType.accept.ord)
@@ -152,8 +149,6 @@ proc saveAs() =
   d.show
 
 proc showShot() =
-  ## Show the capture as a miniature with its save/copy buttons, then do
-  ## whatever the settings ask for.
   app.thumb.setPaintable(app.shot.toPaintable)
   app.resultBox.setVisible(true)
   say($app.shot.w & " x " & $app.shot.h)
@@ -272,8 +267,6 @@ proc onOverlayKey(c: EventControllerKey; keyval, keycode: int;
 proc showOverlay() =
   ## A frozen full-screen copy with a rubber band over it - the same trick
   ## Spectacle uses, and it needs no layer-shell.
-  ## One overlay window: on a multi-head setup the whole desktop is
-  ## letterboxed onto one screen.
   app.win.setVisible(false)
   app.hasSel = false
   let w = newWindow()
@@ -349,17 +342,17 @@ proc cardRow(label: string; w: Widget): Box =
 proc row(box: Box; label: string; w: Widget) =
   box.append(cardRow(label, w))
 
-# Ctrl+V in the path fields: GtkText only pastes text/plain, so a path copied
-# from a file manager (a file:// URI list) lands nowhere. Read the clipboard
-# ourselves in the capture phase and insert whatever it holds as a path.
+# GtkText only pastes text/plain, so a path copied from a file manager (a
+# file:// URI) never arrives. Read the clipboard ourselves, in the capture
+# phase so this runs before GtkText's own Ctrl+V.
 
-const KeyV = 0x76   # 'v'; shifted is 'V'
+const KeyV = 0x76
 
 proc gdk_clipboard_read_text_finish(cb, res, err: pointer): cstring {.
     importc, cdecl, dynlib: "libgtk-4.so.1".}
 proc g_free(p: pointer) {.importc, cdecl, dynlib: "libglib-2.0.so.0".}
 
-var pasteTarget: Entry   # one modal Preferences window, so one target is enough
+var pasteTarget: Entry
 
 proc pastedPath(s: string): string =
   for line in s.splitLines:
@@ -431,10 +424,9 @@ proc savePrefs(p: Prefs) =
   saveConfig(app.cfg)
 
 proc onPrefsCloseRequest(w: gtk4.Window; p: Prefs): bool =
-  savePrefs(p)   # the window's X goes through here too, so it saves as well
-  false          # let the close proceed
+  savePrefs(p)
+  false
 
-# Route the button through close() so both ways out share the one handler.
 proc onPrefsClose(b: Button; p: Prefs) = p.win.close
 
 proc showPrefs() =
@@ -554,7 +546,6 @@ const Css = """
 """
 
 proc modeButton(icon, label: string): ToggleButton =
-  ## Icon over label, the way the old GNOME Screenshot capture-area buttons look.
   result = newToggleButton()
   let inner = newBox(Orientation.vertical, 6)
   inner.setHalign(Align.center)
@@ -573,9 +564,7 @@ proc buildUi(application: Application) =
   app.win.setTitle("Screenshot")
   app.win.setDefaultSize(460, 420)
 
-  # Our capture-area icons live with the app. They go in front of the system
-  # theme, which also lets the bundled +/- stand in on desktops whose Adwaita
-  # fails to render them.
+  # The bundled capture-area icons have to win over the system theme.
   let icons = getIconThemeForDisplay(app.win.getDisplay)
   var paths: seq[string]
   for dir in [getAppDir() / "data" / "icons",                  # built in-tree
@@ -622,16 +611,14 @@ proc buildUi(application: Application) =
   modeBox.append(app.regionBtn)
   body.append(modeBox)
 
-  # Settings card: the two options that belong next to the capture button.
   let card = newBox(Orientation.vertical, 0)
   app.pointerSw = newSwitch()
   app.pointerSw.setActive(app.cfg.includePointer)
   app.pointerSw.setHalign(Align.`end`)
   card.append(cardRow("Show Pointer", app.pointerSw))
   card.append(newSeparator(Orientation.horizontal))
-  # Hand-rolled stepper rather than GtkSpinButton - GTK 4.22's
-  # built-in value-increase/decrease icons render blank on adwaita-icon-theme
-  # 50, and its resource icons win over any icon search path we can set.
+  # Hand-rolled stepper: GtkSpinButton's built-in +/- icons render blank on
+  # adwaita-icon-theme 50.
   let stepper = newBox(Orientation.horizontal, 0)
   stepper.addCssClass("linked")
   app.delayEntry = newEntry()
@@ -656,7 +643,6 @@ proc buildUi(application: Application) =
   cardFrame.setChild(card)
   body.append(cardFrame)
 
-  # Miniature of the last capture, hidden until there is one.
   app.resultBox = newBox(Orientation.vertical, 8)
   app.thumb = newPicture()
   app.thumb.setContentFit(ContentFit.contain)
