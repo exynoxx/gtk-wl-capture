@@ -3,7 +3,7 @@
 ##   gtk-wl-capture              open the window
 ##   gtk-wl-capture --shot FILE  capture every output and write FILE, no UI
 
-import std/[json, os, osproc, streams, strutils, times]
+import std/[json, os, osproc, streams, strutils, times, uri]
 import gintro/[gtk4, gdk4, gobject, gio, glib, cairo]
 import capture
 
@@ -349,6 +349,51 @@ proc cardRow(label: string; w: Widget): Box =
 proc row(box: Box; label: string; w: Widget) =
   box.append(cardRow(label, w))
 
+# Ctrl+V in the path fields: GtkText only pastes text/plain, so a path copied
+# from a file manager (a file:// URI list) lands nowhere. Read the clipboard
+# ourselves in the capture phase and insert whatever it holds as a path.
+
+const KeyV = 0x76   # 'v'; shifted is 'V'
+
+proc gdk_clipboard_read_text_finish(cb, res, err: pointer): cstring {.
+    importc, cdecl, dynlib: "libgtk-4.so.1".}
+proc g_free(p: pointer) {.importc, cdecl, dynlib: "libglib-2.0.so.0".}
+
+var pasteTarget: Entry   # one modal Preferences window, so one target is enough
+
+proc pastedPath(s: string): string =
+  for line in s.splitLines:
+    let t = line.strip
+    if t.len == 0: continue
+    return if t.startsWith("file://"): decodeUrl(t[7 .. ^1], decodePlus = false)
+           else: t
+
+proc onClipboardText(src: ptr gobject.Object00; res: ptr gio.AsyncResult00;
+                     data: pointer) {.cdecl.} =
+  let raw = gdk_clipboard_read_text_finish(src, res, nil)
+  if raw.isNil: return
+  let s = pastedPath($raw)
+  g_free(raw)
+  if s.len == 0 or pasteTarget == nil: return
+  pasteTarget.deleteSelection()
+  var pos = pasteTarget.getPosition
+  pasteTarget.insertText(cstring(s), s.len, pos)
+  pasteTarget.setPosition(pos)
+
+proc onPathKey(c: EventControllerKey; keyval, keycode: int;
+               state: ModifierType; e: Entry): bool =
+  if ModifierFlag.control in state and (keyval or 0x20) == KeyV:
+    pasteTarget = e
+    e.getDisplay.getClipboard.readTextAsync(nil, onClipboardText, nil)
+    return true
+  false
+
+proc pastable(e: Entry) =
+  let keys = newEventControllerKey()
+  keys.setPropagationPhase(PropagationPhase.capture)
+  keys.connect("key-pressed", onPathKey, e)
+  e.addController(keys)
+
 type Prefs = ref object
   win: gtk4.Window
   autoSw, copySw, closeSw, lightSw: Switch
@@ -358,7 +403,25 @@ proc onCopyToggled(sw: Switch; state: bool; p: Prefs): bool =
   p.closeSw.setSensitive(state)   # closing only makes sense once copying is on
   false
 
-proc onPrefsClose(b: Button; p: Prefs) =
+proc onFolderResponse(d: FileChooserDialog; response: int; p: Prefs) =
+  if response == ResponseType.accept.ord:
+    let f = d.getFile
+    if f != nil: p.dirEntry.setText(cstring(f.getPath))
+  gtk4.destroy(d)
+
+proc onPickFolder(b: Button; p: Prefs) =
+  let d = newFileChooserDialog("Save Folder", p.win,
+                               FileChooserAction.selectFolder)
+  discard d.addButton("_Cancel", ResponseType.cancel.ord)
+  discard d.addButton("_Select", ResponseType.accept.ord)
+  try:
+    discard d.setCurrentFolder(gio.newGFileForPath(cstring(p.dirEntry.getText)))
+  except CatchableError:
+    discard
+  d.connect("response", onFolderResponse, p)
+  d.show
+
+proc savePrefs(p: Prefs) =
   app.cfg.autoSave = p.autoSw.getActive
   app.cfg.copyOnCapture = p.copySw.getActive
   app.cfg.closeOnCapture = p.closeSw.getActive
@@ -366,7 +429,13 @@ proc onPrefsClose(b: Button; p: Prefs) =
   app.cfg.saveDir = p.dirEntry.getText
   app.cfg.filename = p.nameEntry.getText
   saveConfig(app.cfg)
-  gtk4.destroy(p.win)
+
+proc onPrefsCloseRequest(w: gtk4.Window; p: Prefs): bool =
+  savePrefs(p)   # the window's X goes through here too, so it saves as well
+  false          # let the close proceed
+
+# Route the button through close() so both ways out share the one handler.
+proc onPrefsClose(b: Button; p: Prefs) = p.win.close
 
 proc showPrefs() =
   let p = Prefs(win: newWindow(), autoSw: newSwitch(), copySw: newSwitch(),
@@ -401,10 +470,19 @@ proc showPrefs() =
 
   p.dirEntry.setText(cstring(app.cfg.saveDir))
   p.dirEntry.setHexpand(true)
-  box.row("Save folder", p.dirEntry)
+  pastable(p.dirEntry)
+  let pick = newButtonFromIconName("folder-symbolic")
+  pick.setTooltipText("Choose folder")
+  pick.connect("clicked", onPickFolder, p)
+  let dirBox = newBox(Orientation.horizontal, 6)
+  dirBox.setHexpand(true)
+  dirBox.append(p.dirEntry)
+  dirBox.append(pick)
+  box.row("Save folder", dirBox)
 
   p.nameEntry.setText(cstring(app.cfg.filename))
   p.nameEntry.setHexpand(true)
+  pastable(p.nameEntry)
   box.row("File name", p.nameEntry)
 
   let hint = newLabel("File name is a Nim time format - literal text goes in " &
@@ -419,6 +497,7 @@ proc showPrefs() =
   close.connect("clicked", onPrefsClose, p)
   box.append(close)
 
+  p.win.connect("close-request", onPrefsCloseRequest, p)
   p.win.setChild(box)
   p.win.present
 
