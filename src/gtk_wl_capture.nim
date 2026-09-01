@@ -8,7 +8,7 @@ import gintro/[gtk4, gdk4, gobject, gio, glib, cairo]
 import capture
 
 const
-  AppId = "dev.nicholas.GtkWlCapture"
+  AppId = "dev.gtkwlcapture.GtkWlCapture"
   KeyEscape = 0xff1b
 
 type
@@ -137,8 +137,8 @@ proc onSaveResponse(d: FileChooserDialog; response: int) =
   gtk4.destroy(d)
 
 proc saveAs() =
-  ## ponytail: GtkFileChooserDialog is deprecated in favour of GtkFileDialog,
-  ## whose gintro binding is raw-async only; swap when that is wrapped.
+  ## GtkFileChooserDialog is deprecated in favour of GtkFileDialog, whose
+  ## gintro binding is raw-async only.
   let d = newFileChooserDialog("Save Screenshot", app.win, FileChooserAction.save)
   discard d.addButton("_Cancel", ResponseType.cancel.ord)
   discard d.addButton("_Save", ResponseType.accept.ord)
@@ -272,8 +272,8 @@ proc onOverlayKey(c: EventControllerKey; keyval, keycode: int;
 proc showOverlay() =
   ## A frozen full-screen copy with a rubber band over it - the same trick
   ## Spectacle uses, and it needs no layer-shell.
-  ## ponytail: one overlay window. On a multi-head setup the whole desktop is
-  ## letterboxed onto one screen; per-monitor overlays would fix that.
+  ## One overlay window: on a multi-head setup the whole desktop is
+  ## letterboxed onto one screen.
   app.win.setVisible(false)
   app.hasSel = false
   let w = newWindow()
@@ -629,7 +629,7 @@ proc buildUi(application: Application) =
   app.pointerSw.setHalign(Align.`end`)
   card.append(cardRow("Show Pointer", app.pointerSw))
   card.append(newSeparator(Orientation.horizontal))
-  # ponytail: hand-rolled stepper rather than GtkSpinButton - GTK 4.22's
+  # Hand-rolled stepper rather than GtkSpinButton - GTK 4.22's
   # built-in value-increase/decrease icons render blank on adwaita-icon-theme
   # 50, and its resource icons win over any icon search path we can set.
   let stepper = newBox(Orientation.horizontal, 0)

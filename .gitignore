@@ -5,3 +5,6 @@ src/protocols/
 /gtk-wl-capture
 /tests/tgeometry
 nimcache/
+
+# packages
+/dist/

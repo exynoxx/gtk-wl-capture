@@ -58,12 +58,12 @@ task stage, "install the built tree into DESTDIR (packaging helper)":
   exec "chmod 755 " & (bindir / "gtk-wl-capture")
 
   mkDir(appdir)
-  cpFile("data/dev.nicholas.GtkWlCapture.desktop",
-         appdir / "dev.nicholas.GtkWlCapture.desktop")
+  cpFile("data/dev.gtkwlcapture.GtkWlCapture.desktop",
+         appdir / "dev.gtkwlcapture.GtkWlCapture.desktop")
 
   mkDir(icondir)
-  cpFile("data/dev.nicholas.GtkWlCapture.svg",
-         icondir / "dev.nicholas.GtkWlCapture.svg")
+  cpFile("data/dev.gtkwlcapture.GtkWlCapture.svg",
+         icondir / "dev.gtkwlcapture.GtkWlCapture.svg")
 
   mkDir(datadir / "icons/hicolor/scalable/actions")
   cpFile("data/icons/hicolor/index.theme", datadir / "icons/hicolor/index.theme")
@@ -73,4 +73,5 @@ task stage, "install the built tree into DESTDIR (packaging helper)":
 
   mkDir(docdir)
   cpFile("README.md", docdir / "README.md")
+  cpFile("LICENSE", docdir / "LICENSE")
   echo "staged into ", (if destdir.len > 0: destdir else: "/"), " under ", prefix

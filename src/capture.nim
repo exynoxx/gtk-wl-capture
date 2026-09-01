@@ -113,8 +113,8 @@ func crop*(s: Shot; x, y, w, h: int): Shot =
 
 func blit(dst: var Shot; src: Shot; dx, dy, dw, dh: int) =
   ## Nearest-neighbour blit of `src` into `dst` at dx,dy scaled to dw x dh.
-  ## ponytail: nearest-neighbour is fine for integer scales; swap in a box
-  ## filter if fractional-scale multi-monitor output ever looks bad.
+  ## Fine for integer scales; a box filter would be needed if fractional-scale
+  ## multi-monitor output ever looks bad.
   for ry in 0 ..< dh:
     let sy = min(ry * src.h div max(dh, 1), src.h - 1)
     let dRow = (dy + ry) * dst.stride
@@ -369,9 +369,8 @@ proc capturePortal(): Shot =
   ## org.freedesktop.portal.Screenshot hands back a PNG on disk. The URI comes
   ## on the Request object's Response signal, so the monitor has to be running
   ## before the call goes out.
-  ## ponytail: driven through the gdbus CLI (ships with glib, already a GTK
-  ## dependency); move to gio's GDBusConnection if this ever needs interactive
-  ## options or a progress UI.
+  ## Driven through the gdbus CLI, which ships with glib and is therefore
+  ## already a GTK dependency.
   if findExe("gdbus").len == 0:
     raise newException(CaptureError, "no zwlr_screencopy and no gdbus for the portal fallback")
   # Wrapped in `timeout` so readLine cannot block forever: most portals put a
