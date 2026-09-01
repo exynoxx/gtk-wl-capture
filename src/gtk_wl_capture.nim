@@ -580,6 +580,7 @@ proc buildUi(application: Application) =
   addProviderForDisplay(app.win.getDisplay, css, 600)
 
   let header = newHeaderBar()
+  header.setDecorationLayout("close,maximize,minimize:")
   let takeBtn = newButton("Take Screenshot")
   takeBtn.addCssClass("suggested-action")
   takeBtn.connect("clicked", onNew)
