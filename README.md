@@ -28,7 +28,7 @@ Needs Nim (>= 2.0) with nimble, GTK 4, and the Wayland client library plus
 `wayland-scanner` for the protocol glue.
 
     # Fedora
-    sudo dnf install nim gtk4-devel wayland-devel wayland-protocols-devel wlr-protocols
+    sudo dnf install nim gtk4-devel wayland-devel wayland-protocols-devel
     # Debian/Ubuntu
     sudo apt install nim libgtk-4-dev libwayland-dev wayland-protocols
 

@@ -12,7 +12,7 @@ requires "gintro >= 1.0.0"
 import std/os
 
 const protos = [
-  ("/usr/share/wlr-protocols/unstable/wlr-screencopy-unstable-v1.xml", "wlr-screencopy-unstable-v1"),
+  ("protocols/wlr-screencopy-unstable-v1.xml", "wlr-screencopy-unstable-v1"),
   ("/usr/share/wayland-protocols/unstable/xdg-output/xdg-output-unstable-v1.xml", "xdg-output-unstable-v1"),
 ]
 
