@@ -30,8 +30,9 @@ Needs Nim (>= 2.0) with nimble, GTK 4, and the Wayland client library plus
     # Fedora
     sudo dnf install nim gtk4-devel wayland-devel wayland-protocols-devel wlr-protocols
     # Debian/Ubuntu
-    sudo apt install nim gtk-4-dev libwayland-dev wayland-protocols
+    sudo apt install nim libgtk-4-dev libwayland-dev wayland-protocols
 
+    git clone https://github.com/exynoxx/gtk-wl-capture && cd gtk-wl-capture
     nimble build      # generates the protocol glue on first run
     ./gtk-wl-capture
 
