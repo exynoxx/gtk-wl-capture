@@ -24,7 +24,13 @@ output the window is on, Selection records the rectangle you drag. While
 recording the window shows a big Pause/Resume and Stop. Format (mp4, webm,
 mkv, gif) and frames per second are in Preferences, as are the two
 shortcuts: `Ctrl+R` start/stop and `Ctrl+P` pause/resume by default (they
-work while the window has focus). Videos land in the save folder.
+work while the window has focus). When it stops you get the same Copy / Save
+/ Save As row as for a screenshot; Copy puts the file on the clipboard.
+
+Recording streams to disk in a hidden folder inside the save folder, encoded
+live (H.264, or VP8 for webm), so long videos never sit in memory and Save is
+a rename. A recording you never saved is saved anyway when you quit or start
+the next one.
 
 Needs `wf-recorder` and `ffmpeg`, so wlroots-family compositors only - there
 is no portal fallback for video yet.

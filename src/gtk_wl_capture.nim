@@ -34,6 +34,7 @@ type
   App = ref object
     win: ApplicationWindow
     thumb: Picture
+    thumbFrame: Frame
     resultBox: Box
     status: Label
     copyBtn, saveBtn, saveAsBtn: Button
@@ -53,8 +54,10 @@ type
     recOutput: string      ## connector of the window's monitor, for -o
     recSecs: int
     rec: Recorder
-    encoder: Process       ## the ffmpeg join, while it runs
-    recPath: string
+    recFormat: VideoFormat ## fixed at start: the segments are encoded for it
+    encoding: bool         ## ffmpeg is still turning segments into the video
+    video: string          ## the last result when it is a recording, else ""
+    videoStaged: bool      ## `video` still sits in the recorder's folder
 
 var app: App   # single window, single capture at a time
 
@@ -123,14 +126,19 @@ proc timestampedPath(c: Config; ext = "png"): string =
 proc say(msg: string) =
   if app.status != nil: app.status.setLabel(msg)
 
-proc copyShot() =
-  ## wl-copy forks a holder process, so the image survives this app exiting.
+proc savePath(): string =
+  timestampedPath(app.cfg, if app.video.len > 0: app.video.splitFile.ext[1 .. ^1]
+                           else: "png")
+
+proc hasResult(): bool = app.video.len > 0 or not app.shot.isEmpty
+
+proc copyBytes(mime: string; bytes: glib.Bytes) =
+  ## wl-copy forks a holder process, so the data survives this app exiting.
   ## GDK's clipboard cannot: Wayland requires the source client to stay alive.
-  let png = app.shot.pngBytes()
   var size: uint64
-  let data = png.getData(size)
+  let data = bytes.getData(size)
   if findExe("wl-copy").len > 0:
-    let p = startProcess("wl-copy", args = ["--type", "image/png"],
+    let p = startProcess("wl-copy", args = ["--type", mime],
                          options = {poUsePath})
     p.inputStream.writeData(unsafeAddr data[0], data.len)
     p.inputStream.close()
@@ -139,16 +147,47 @@ proc copyShot() =
     say("Copied to clipboard")
   else:
     let cb = app.win.getDisplay.getClipboard
-    discard cb.setContent(newContentProviderForBytes("image/png", png))
+    discard cb.setContent(newContentProviderForBytes(cstring(mime), bytes))
     say("Copied (only while this window stays open - install wl-clipboard)")
 
+proc saveVideo(path: string) =
+  try:
+    createDir(path.parentDir)
+    if app.videoStaged:
+      moveFile(app.video, path)   # same disk as the save folder: a rename
+      app.video = path
+      app.videoStaged = false
+      app.rec.cleanup()
+    else:
+      copyFile(app.video, path)
+    say("Saved " & path)
+  except CatchableError as e:
+    say("Save failed: " & e.msg)
+
 proc saveShot(path: string) =
+  if app.video.len > 0:
+    saveVideo(path)
+    return
   try:
     createDir(path.parentDir)
     app.shot.savePng(path)
     say("Saved " & path)
   except CatchableError as e:
     say("Save failed: " & e.msg)
+
+proc copyShot() =
+  if app.video.len == 0:
+    copyBytes("image/png", app.shot.pngBytes())
+    return
+  # A video goes on the clipboard as a file, so it has to stay where it is.
+  if app.videoStaged: saveVideo(savePath())
+  if app.videoStaged: return   # the save failed and said why
+  let uri = $gio.newGFileForPath(cstring(app.video)).getUri & "\r\n"
+  copyBytes("text/uri-list", newBytes(@(uri.toOpenArrayByte(0, uri.high))))
+
+proc keepVideo() =
+  ## An unsaved recording is too costly to drop silently.
+  if app.videoStaged: saveVideo(savePath())
 
 proc onSaveResponse(d: FileChooserDialog; response: int) =
   if response == ResponseType.accept.ord:
@@ -157,10 +196,11 @@ proc onSaveResponse(d: FileChooserDialog; response: int) =
   gtk4.destroy(d)
 
 proc saveAs() =
-  let d = newFileChooserDialog("Save Screenshot", app.win, FileChooserAction.save)
+  let d = newFileChooserDialog(cstring(if app.video.len > 0: "Save Recording" else: "Save Screenshot"),
+                               app.win, FileChooserAction.save)
   discard d.addButton("_Cancel", ResponseType.cancel.ord)
   discard d.addButton("_Save", ResponseType.accept.ord)
-  let suggested = timestampedPath(app.cfg)
+  let suggested = savePath()
   d.setCurrentName(cstring(suggested.extractFilename))
   try:
     discard d.setCurrentFolder(gio.newGFileForPath(cstring(app.cfg.saveDir)))
@@ -169,14 +209,21 @@ proc saveAs() =
   d.connect("response", onSaveResponse)
   d.show
 
-proc showShot() =
-  app.thumb.setPaintable(app.shot.toPaintable)
+proc afterCapture() =
   app.resultBox.setVisible(true)
-  say($app.shot.w & " x " & $app.shot.h)
   if app.cfg.copyOnCapture: copyShot()
-  if app.cfg.autoSave: saveShot(timestampedPath(app.cfg))
+  # Copying a video already saved it.
+  if app.cfg.autoSave and (app.video.len == 0 or app.videoStaged):
+    saveShot(savePath())
   if app.cfg.copyOnCapture and app.cfg.closeOnCapture:
     gtk4.destroy(app.win)
+
+proc showShot() =
+  app.video = ""
+  app.thumb.setPaintable(app.shot.toPaintable)
+  app.thumbFrame.setVisible(true)
+  say($app.shot.w & " x " & $app.shot.h)
+  afterCapture()
 
 proc delayValue(): float =
   try: clamp(parseFloat(app.delayEntry.getText.strip), 0.0, 60.0)
@@ -193,27 +240,36 @@ proc onDelayPlus(b: Button) = setDelay(delayValue() + 1)
 proc clock(secs: int): string =
   align($(secs div 60), 2, '0') & ":" & align($(secs mod 60), 2, '0')
 
+proc encoded(code: int) =
+  app.encoding = false
+  if code != 0:
+    app.rec.cleanup()
+    say("ffmpeg failed (exit " & $code & ") - the recording was discarded")
+    return
+  app.video = app.rec.output
+  app.videoStaged = true
+  app.thumbFrame.setVisible(false)
+  say(clock(app.recSecs) & " " & $app.recFormat & " recording")
+  afterCapture()
+
 proc onEncodeTick(data: pointer): gboolean {.cdecl.} =
-  let code = app.encoder.peekExitCode
+  if not app.encoding: return gboolean(false)   # onWinClose finished it
+  let code = app.rec.poll
   if code == -1: return gboolean(true)
-  app.encoder.close()
-  app.encoder = nil
-  app.rec.cleanup()
-  say(if code == 0: "Saved " & app.recPath
-      else: "ffmpeg failed (exit " & $code & ") - segments were discarded")
+  encoded(code)
   gboolean(false)
 
 proc stopRecording() =
   if not app.recActive: return
   app.recActive = false
   app.stack.setVisibleChildName("main")
-  app.recPath = timestampedPath(app.cfg, $app.cfg.videoFormat)
   try:
-    app.encoder = app.rec.finish(app.recPath, app.cfg.videoFormat)
+    app.rec.finish(app.recFormat)
   except CatchableError as e:
     say(e.msg)
     return
-  say("Encoding " & app.recPath & "...")
+  app.encoding = true
+  say("Finishing the recording...")
   discard timeoutAdd(0, 200, onEncodeTick, nil, nil)
 
 proc togglePause() =
@@ -246,7 +302,9 @@ proc beginRecording(geom, output: string) =
   app.win.setVisible(true)
   app.win.present
   try:
-    app.rec = newRecorder(recorderArgs(app.cfg.fps, geom, output))
+    app.recFormat = app.cfg.videoFormat
+    app.rec = newRecorder(recorderArgs(app.recFormat, app.cfg.fps, geom, output),
+                          app.cfg.saveDir / ".gtk-wl-capture-rec-" & $getCurrentProcessId())
     app.rec.resume()
   except CatchableError as e:
     say(e.msg)
@@ -418,9 +476,10 @@ proc doCapture(data: pointer): gboolean {.cdecl.} =
 
 proc takeShot(record = false) =
   if app.recActive: return
-  if record and app.encoder != nil:
-    say("Still encoding the last recording")
+  if app.encoding:
+    say("Still finishing the last recording")
     return
+  keepVideo()
   app.wantRecord = record
   if record:
     # Full-screen recording is one output: the one this window is on.
@@ -656,11 +715,11 @@ proc showPrefs() =
 
 proc onActNew(a: gio.SimpleAction; v: glib.Variant) = takeShot()
 proc onActCopy(a: gio.SimpleAction; v: glib.Variant) =
-  if not app.shot.isEmpty: copyShot()
+  if hasResult(): copyShot()
 proc onActSave(a: gio.SimpleAction; v: glib.Variant) =
-  if not app.shot.isEmpty: saveShot(timestampedPath(app.cfg))
+  if hasResult(): saveShot(savePath())
 proc onActSaveAs(a: gio.SimpleAction; v: glib.Variant) =
-  if not app.shot.isEmpty: saveAs()
+  if hasResult(): saveAs()
 proc onActPrefs(a: gio.SimpleAction; v: glib.Variant) = showPrefs()
 proc onActQuit(a: gio.SimpleAction; v: glib.Variant) = app.win.close
 proc onActRecord(a: gio.SimpleAction; v: glib.Variant) =
@@ -704,7 +763,7 @@ proc addAccels(application: Application) =
 
 proc onNew(b: Button) = takeShot()
 proc onCopy(b: Button) = copyShot()
-proc onSave(b: Button) = saveShot(timestampedPath(app.cfg))
+proc onSave(b: Button) = saveShot(savePath())
 proc onSaveAs(b: Button) = saveAs()
 proc onPrefs(b: Button) = showPrefs()
 proc onRecord(b: Button) = takeShot(record = true)
@@ -714,10 +773,16 @@ proc onStopClicked(b: Button) = stopRecording()
 proc onWinClose(w: ApplicationWindow): bool =
   ## wf-recorder would outlive us and keep recording; save what we have.
   stopRecording()
-  if app.encoder != nil:
-    discard app.encoder.waitForExit()
-    app.encoder.close()
-    app.rec.cleanup()
+  if app.encoding:
+    var code = app.rec.poll
+    while code == -1:
+      sleep(100)
+      code = app.rec.poll
+    # Not `encoded`: close-on-copy would destroy the window mid close-request.
+    if code == 0:
+      app.video = app.rec.output
+      app.videoStaged = true
+  keepVideo()
   false
 
 const Css = """
@@ -834,9 +899,9 @@ proc buildUi(application: Application) =
   app.thumb = newPicture()
   app.thumb.setContentFit(ContentFit.contain)
   app.thumb.setSizeRequest(-1, 150)
-  let thumbFrame = newFrame()
-  thumbFrame.setChild(app.thumb)
-  app.resultBox.append(thumbFrame)
+  app.thumbFrame = newFrame()
+  app.thumbFrame.setChild(app.thumb)
+  app.resultBox.append(app.thumbFrame)
 
   let actions = newBox(Orientation.horizontal, 6)
   actions.setHomogeneous(true)

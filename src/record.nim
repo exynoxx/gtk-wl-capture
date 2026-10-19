@@ -1,8 +1,9 @@
 ## Screen recording through wf-recorder (wlroots-family compositors only).
 ##
 ## Each stretch between pauses is its own mkv segment: wf-recorder has no
-## pause, and stopping it cleanly is the only way to get a valid file. On stop,
-## ffmpeg joins the segments and converts them to the chosen format.
+## pause, and stopping it cleanly is the only way to get a valid file. Segments
+## are encoded live in the final codec, so on stop ffmpeg only stitches them
+## (gif aside). Everything streams through files on disk, never RAM.
 
 import std/[os, osproc, posix, strutils]
 
@@ -18,6 +19,9 @@ type
     args: seq[string]   ## wf-recorder arguments, minus the output file
     segs: seq[string]
     cur: Process
+    jobs: seq[seq[string]]   ## ffmpeg runs still to go after `job`
+    job: Process
+    output*: string          ## the finished video, inside `dir`
 
   RecordError* = object of CatchableError
 
@@ -31,31 +35,35 @@ func geometry*(originX, originY, w, h: int; scale: float): string =
     lh = int(h.float / scale) and not 1
   $originX & "," & $originY & " " & $lw & "x" & $lh
 
-func recorderArgs*(fps: int; geom, output: string): seq[string] =
+func recorderArgs*(fmt: VideoFormat; fps: int; geom, output: string): seq[string] =
   ## `geom` wins over `output`; with neither, wf-recorder would prompt on stdin.
-  # wf-recorder 0.6 defaults to VP9 and 4:4:4; H.264 yuv420p plays everywhere
-  # and copies straight into mp4/mkv.
-  result = @["-y", "-c", "libx264", "-x", "yuv420p", "-r", $fps]
+  # wf-recorder 0.6 defaults to VP9 and 4:4:4. VP9 cannot keep up in real time
+  # and wf-recorder queues the frames in RAM; VP8 and x264 at yuv420p can.
+  let codec = if fmt == vfWebm: "libvpx" else: "libx264"
+  result = @["-y", "-c", codec, "-x", "yuv420p", "-r", $fps]
   if geom.len > 0: result.add ["-g", geom]
   elif output.len > 0: result.add ["-o", output]
 
-func joinArgs*(listFile, dest: string; fmt: VideoFormat): seq[string] =
-  result = @["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", listFile]
-  case fmt
-  of vfMp4, vfMkv: result.add ["-c", "copy"]
-  of vfWebm: result.add ["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "32", "-row-mt", "1"]
-  of vfGif: result.add ["-vf", "split[a][b];[a]palettegen[p];[b][p]paletteuse"]
-  result.add dest
+func joinCmds*(listFile, palette, dest: string; fmt: VideoFormat): seq[seq[string]] =
+  ## ffmpeg runs, in order. Gif takes two passes: palettegen in one filter
+  # graph with paletteuse would hold every frame in memory until the end.
+  let input = @["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", listFile]
+  if fmt == vfGif:
+    @[input & @["-vf", "palettegen", palette],
+      input & @["-i", palette, "-lavfi", "paletteuse", dest]]
+  else:
+    @[input & @["-c", "copy", dest]]
 
 func concatList*(segs: seq[string]): string =
   for s in segs: result.add "file '" & s.replace("'", "'\\''") & "'\n"
 
-proc newRecorder*(args: seq[string]): Recorder =
+proc newRecorder*(args: seq[string]; dir: string): Recorder =
+  ## `dir` should be on a real disk next to where the video ends up: /tmp is
+  ## often tmpfs, and saving is then a rename.
   for tool in ["wf-recorder", "ffmpeg"]:
     if findExe(tool).len == 0:
       raise newException(RecordError, "recording needs " & tool & " installed")
-  Recorder(args: args,
-           dir: getTempDir() / "gtk-wl-capture-rec-" & $getCurrentProcessId())
+  Recorder(args: args, dir: dir)
 
 func recording*(r: Recorder): bool = r.cur != nil
 
@@ -81,12 +89,33 @@ proc pause*(r: var Recorder) =
   r.cur.close()
   r.cur = nil
 
+proc runNext(r: var Recorder) =
+  r.job = startProcess("ffmpeg", args = r.jobs[0], options = {poUsePath, poParentStreams})
+  r.jobs.delete(0)
+
+proc poll*(r: var Recorder): int =
+  ## Exit code of the ffmpeg chain started by `finish`, -1 while it runs.
+  if r.job == nil: return 0
+  result = r.job.peekExitCode
+  if result == -1: return
+  r.job.close()
+  r.job = nil
+  if result == 0 and r.jobs.len > 0:
+    r.runNext()
+    result = -1
+
 proc cleanup*(r: var Recorder) =
   r.pause()
+  if r.job != nil:
+    r.job.terminate()
+    discard r.job.waitForExit()
+    r.job.close()
+    r.job = nil
+  r.jobs = @[]
   removeDir(r.dir)
 
-proc finish*(r: var Recorder; dest: string; fmt: VideoFormat): Process =
-  ## Stops recording and starts the ffmpeg join; poll its exit, then `cleanup`.
+proc finish*(r: var Recorder; fmt: VideoFormat) =
+  ## Stops recording and starts ffmpeg on `output`; `poll` until it is done.
   r.pause()
   var good: seq[string]
   for s in r.segs:
@@ -96,6 +125,6 @@ proc finish*(r: var Recorder; dest: string; fmt: VideoFormat): Process =
     raise newException(RecordError, "nothing was recorded")
   let list = r.dir / "list.txt"
   writeFile(list, concatList(good))
-  createDir(dest.parentDir)
-  startProcess("ffmpeg", args = joinArgs(list, dest, fmt),
-               options = {poUsePath, poParentStreams})
+  r.output = r.dir / "video." & $fmt
+  r.jobs = joinCmds(list, r.dir / "palette.png", r.output, fmt)
+  r.runNext()
