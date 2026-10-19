@@ -41,6 +41,8 @@ BuildArch:      $arch
 Requires:       gtk4
 Requires:       libwayland-client
 Recommends:     wl-clipboard
+Recommends:     wf-recorder
+Recommends:     (ffmpeg or ffmpeg-free)
 
 %description
 $descr
@@ -75,7 +77,7 @@ Section: graphics
 Priority: optional
 Architecture: $debarch
 Depends: libgtk-4-1, libwayland-client0, libglib2.0-0
-Recommends: wl-clipboard
+Recommends: wl-clipboard, wf-recorder, ffmpeg
 Installed-Size: $(du -ks "$root" | cut -f1)
 Maintainer: gtk-wl-capture contributors <nobody@localhost>
 Description: $summary

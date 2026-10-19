@@ -3,9 +3,9 @@
 ##   gtk-wl-capture              open the window
 ##   gtk-wl-capture --shot FILE  capture every output and write FILE, no UI
 
-import std/[json, os, osproc, streams, strutils, times, uri]
+import std/[json, os, osproc, sequtils, streams, strutils, times, uri]
 import gintro/[gtk4, gdk4, gobject, gio, glib, cairo]
-import capture
+import capture, record
 
 const
   AppId = "dev.gtkwlcapture.GtkWlCapture"
@@ -27,6 +27,9 @@ type
     delay: float
     lightTheme: bool
     mode: Mode
+    videoFormat: VideoFormat
+    fps: int
+    recordKey, pauseKey: string   ## GTK accelerator strings, "" = none
 
   App = ref object
     win: ApplicationWindow
@@ -43,6 +46,15 @@ type
     area: DrawingArea
     sel: array[4, float]   ## x0, y0, x1, y1 in overlay widget coords
     hasSel: bool
+    stack: Stack
+    recTime, recHint: Label
+    pauseBtn: Button
+    wantRecord, recActive: bool
+    recOutput: string      ## connector of the window's monitor, for -o
+    recSecs: int
+    rec: Recorder
+    encoder: Process       ## the ffmpeg join, while it runs
+    recPath: string
 
 var app: App   # single window, single capture at a time
 
@@ -58,7 +70,9 @@ proc defaultConfig(): Config =
          filename: "'Screenshot_'yyyy'-'MM'-'dd'_'HH'-'mm'-'ss'.png'",
          copyOnCapture: false, closeOnCapture: false,
          includePointer: false, hideWindow: true,
-         delay: 0.0, lightTheme: true, mode: mRegion)
+         delay: 0.0, lightTheme: true, mode: mRegion,
+         videoFormat: vfMp4, fps: 30,
+         recordKey: "<Control>r", pauseKey: "<Control>p")
 
 proc configPath(): string =
   getConfigDir() / "gtk-wl-capture" / "config.json"
@@ -78,6 +92,11 @@ proc loadConfig(): Config =
     if j.hasKey("delay"): result.delay = j["delay"].getFloat
     if j.hasKey("lightTheme"): result.lightTheme = j["lightTheme"].getBool
     if j.hasKey("mode") and j["mode"].getStr == $mScreen: result.mode = mScreen
+    if j.hasKey("videoFormat"):
+      result.videoFormat = parseEnum[VideoFormat](j["videoFormat"].getStr, vfMp4)
+    if j.hasKey("fps"): result.fps = clamp(j["fps"].getInt(30), 1, 120)
+    if j.hasKey("recordKey"): result.recordKey = j["recordKey"].getStr
+    if j.hasKey("pauseKey"): result.pauseKey = j["pauseKey"].getStr
   except CatchableError:
     discard   # a corrupt config should never stop the app from starting
 
@@ -88,14 +107,16 @@ proc saveConfig(c: Config) =
     "copyOnCapture": c.copyOnCapture, "closeOnCapture": c.closeOnCapture,
     "includePointer": c.includePointer,
     "hideWindow": c.hideWindow, "delay": c.delay,
-    "lightTheme": c.lightTheme, "mode": $c.mode
+    "lightTheme": c.lightTheme, "mode": $c.mode,
+    "videoFormat": $c.videoFormat, "fps": c.fps,
+    "recordKey": c.recordKey, "pauseKey": c.pauseKey
   }).pretty)
 
-proc timestampedPath(c: Config): string =
+proc timestampedPath(c: Config; ext = "png"): string =
   var name = try: now().format(c.filename)
              except CatchableError: now().format("'Screenshot_'yyyy'-'MM'-'dd'_'HH'-'mm'-'ss'.png'")
   if not name.endsWith(".png"): name.add ".png"
-  c.saveDir / name
+  c.saveDir / name.changeFileExt(ext)
 
 # --- result handling -------------------------------------------------------
 
@@ -166,6 +187,81 @@ proc setDelay(v: float) =
 
 proc onDelayMinus(b: Button) = setDelay(delayValue() - 1)
 proc onDelayPlus(b: Button) = setDelay(delayValue() + 1)
+
+# --- recording -------------------------------------------------------------
+
+proc clock(secs: int): string =
+  align($(secs div 60), 2, '0') & ":" & align($(secs mod 60), 2, '0')
+
+proc onEncodeTick(data: pointer): gboolean {.cdecl.} =
+  let code = app.encoder.peekExitCode
+  if code == -1: return gboolean(true)
+  app.encoder.close()
+  app.encoder = nil
+  app.rec.cleanup()
+  say(if code == 0: "Saved " & app.recPath
+      else: "ffmpeg failed (exit " & $code & ") - segments were discarded")
+  gboolean(false)
+
+proc stopRecording() =
+  if not app.recActive: return
+  app.recActive = false
+  app.stack.setVisibleChildName("main")
+  app.recPath = timestampedPath(app.cfg, $app.cfg.videoFormat)
+  try:
+    app.encoder = app.rec.finish(app.recPath, app.cfg.videoFormat)
+  except CatchableError as e:
+    say(e.msg)
+    return
+  say("Encoding " & app.recPath & "...")
+  discard timeoutAdd(0, 200, onEncodeTick, nil, nil)
+
+proc togglePause() =
+  if not app.recActive: return
+  if app.rec.recording:
+    app.rec.pause()
+    app.pauseBtn.setLabel("Resume")
+    say("Paused")
+  else:
+    try:
+      app.rec.resume()
+    except CatchableError as e:
+      say(e.msg)
+      return
+    app.pauseBtn.setLabel("Pause")
+    say("Recording")
+
+proc onRecTick(data: pointer): gboolean {.cdecl.} =
+  if not app.recActive: return gboolean(false)
+  if app.rec.died:
+    say("wf-recorder stopped on its own")
+    stopRecording()
+    return gboolean(false)
+  if app.rec.recording:
+    inc app.recSecs
+    app.recTime.setLabel(cstring(clock(app.recSecs)))
+  gboolean(true)
+
+proc beginRecording(geom, output: string) =
+  app.win.setVisible(true)
+  app.win.present
+  try:
+    app.rec = newRecorder(recorderArgs(app.cfg.fps, geom, output))
+    app.rec.resume()
+  except CatchableError as e:
+    say(e.msg)
+    return
+  app.recActive = true
+  app.recSecs = 0
+  app.recTime.setLabel("00:00")
+  app.pauseBtn.setLabel("Pause")
+  var keys: seq[string]
+  if app.cfg.pauseKey.len > 0: keys.add app.cfg.pauseKey & " pauses"
+  if app.cfg.recordKey.len > 0: keys.add app.cfg.recordKey & " stops"
+  app.recHint.setLabel(cstring(keys.join(", ")))
+  app.stack.setVisibleChildName("rec")
+  say("Recording")
+  discard timeoutAdd(0, 1000, onRecTick, nil, nil)
 
 # --- region overlay --------------------------------------------------------
 
@@ -239,19 +335,23 @@ proc finishRegion() =
   let (offX, offY, scale) = mapping(app.area.getWidth.float, app.area.getHeight.float)
   app.shot = app.shot.crop(int((r.x - offX) * scale), int((r.y - offY) * scale),
                            int(r.w * scale), int(r.h * scale))
-  showShot()
+  if app.wantRecord:
+    beginRecording(geometry(app.shot.originX, app.shot.originY,
+                            app.shot.w, app.shot.h, app.shot.scale), "")
+  else:
+    showShot()
 
-proc onDragBegin(g: GestureDrag; x, y: float) =
+proc onDragBegin(g: GestureDrag; x, y: cdouble) =
   app.sel = [x, y, x, y]
   app.hasSel = true
   app.area.queueDraw
 
-proc onDragUpdate(g: GestureDrag; dx, dy: float) =
+proc onDragUpdate(g: GestureDrag; dx, dy: cdouble) =
   app.sel[2] = app.sel[0] + dx
   app.sel[3] = app.sel[1] + dy
   app.area.queueDraw
 
-proc onDragEnd(g: GestureDrag; dx, dy: float) =
+proc onDragEnd(g: GestureDrag; dx, dy: cdouble) =
   app.sel[2] = app.sel[0] + dx
   app.sel[3] = app.sel[1] + dy
   finishRegion()
@@ -302,6 +402,9 @@ proc showOverlay() =
 
 proc doCapture(data: pointer): gboolean {.cdecl.} =
   try:
+    if app.wantRecord and app.cfg.mode == mScreen:
+      beginRecording("", app.recOutput)
+      return gboolean(false)
     app.shot = capture(app.cfg.includePointer)
     if app.cfg.mode == mRegion:
       showOverlay()
@@ -313,15 +416,25 @@ proc doCapture(data: pointer): gboolean {.cdecl.} =
     say(e.msg)
   gboolean(false)   # one-shot timeout
 
-proc takeShot() =
-  say("Capturing...")
+proc takeShot(record = false) =
+  if app.recActive: return
+  if record and app.encoder != nil:
+    say("Still encoding the last recording")
+    return
+  app.wantRecord = record
+  if record:
+    # Full-screen recording is one output: the one this window is on.
+    let m = app.win.getDisplay.getMonitorAtSurface(app.win.getSurface)
+    app.recOutput = if m != nil: m.getConnector else: ""
+  say(if record: "Starting recording..." else: "Capturing...")
   app.cfg.delay = delayValue()
   app.cfg.includePointer = app.pointerSw.getActive
   app.cfg.hideWindow = app.hideSw.getActive
   app.cfg.mode = if app.regionBtn.getActive: mRegion else: mScreen
   saveConfig(app.cfg)
   # Region mode always hides the window: it is about to cover the screen anyway.
-  let hide = app.cfg.hideWindow or app.cfg.mode == mRegion
+  # A recording keeps the window up for its stop button.
+  let hide = app.cfg.mode == mRegion or (app.cfg.hideWindow and not record)
   if hide: app.win.setVisible(false)
   # Give the compositor a frame to actually unmap the window before grabbing.
   let ms = int(app.cfg.delay * 1000) + (if hide: 250 else: 0)
@@ -387,10 +500,24 @@ proc pastable(e: Entry) =
   keys.connect("key-pressed", onPathKey, e)
   e.addController(keys)
 
+proc setKey(a: Application; action, key: string) =
+  if key.len > 0: a.setAccelsForAction(cstring(action), key)
+  else: a.setAccelsForAction(cstring(action))
+
+proc applyRecordKeys(a: Application) =
+  a.setKey("app.record", app.cfg.recordKey)
+  a.setKey("app.pause", app.cfg.pauseKey)
+
+proc validKey(s: string): bool =
+  var key: int
+  var mods: ModifierType
+  s.len == 0 or acceleratorParse(cstring(s), key, mods)
+
 type Prefs = ref object
   win: gtk4.Window
   autoSw, copySw, closeSw, lightSw: Switch
-  dirEntry, nameEntry: Entry
+  dirEntry, nameEntry, fpsEntry, recordKeyEntry, pauseKeyEntry: Entry
+  formatDrop: DropDown
 
 proc onCopyToggled(sw: Switch; state: bool; p: Prefs): bool =
   p.closeSw.setSensitive(state)   # closing only makes sense once copying is on
@@ -421,6 +548,15 @@ proc savePrefs(p: Prefs) =
   app.cfg.lightTheme = p.lightSw.getActive
   app.cfg.saveDir = p.dirEntry.getText
   app.cfg.filename = p.nameEntry.getText
+  app.cfg.videoFormat = VideoFormat(clamp(p.formatDrop.getSelected, 0, VideoFormat.high.ord))
+  app.cfg.fps = try: clamp(parseInt(p.fpsEntry.getText.strip), 1, 120)
+                except ValueError: app.cfg.fps
+  # A typo in a shortcut keeps the old one rather than silently unbinding it.
+  for (e, key) in [(p.recordKeyEntry, addr app.cfg.recordKey),
+                   (p.pauseKeyEntry, addr app.cfg.pauseKey)]:
+    let t = e.getText.strip
+    if validKey(t): key[] = t
+  applyRecordKeys(app.win.getApplication)
   saveConfig(app.cfg)
 
 proc onPrefsCloseRequest(w: gtk4.Window; p: Prefs): bool =
@@ -432,7 +568,9 @@ proc onPrefsClose(b: Button; p: Prefs) = p.win.close
 proc showPrefs() =
   let p = Prefs(win: newWindow(), autoSw: newSwitch(), copySw: newSwitch(),
                 closeSw: newSwitch(), lightSw: newSwitch(),
-                dirEntry: newEntry(), nameEntry: newEntry())
+                dirEntry: newEntry(), nameEntry: newEntry(), fpsEntry: newEntry(),
+                recordKeyEntry: newEntry(), pauseKeyEntry: newEntry(),
+                formatDrop: newDropDownFromStrings(VideoFormat.mapIt($it)))
   p.win.setTitle("Preferences")
   p.win.setTransientFor(app.win)
   p.win.setModal(true)
@@ -484,6 +622,27 @@ proc showPrefs() =
   hint.setOpacity(0.7)
   box.append(hint)
 
+  p.formatDrop.setSelected(app.cfg.videoFormat.ord)
+  box.row("Recording format", p.formatDrop)
+
+  p.fpsEntry.setText(cstring($app.cfg.fps))
+  p.fpsEntry.setWidthChars(4)
+  box.row("Recording frames per second", p.fpsEntry)
+
+  for (e, key) in [(p.recordKeyEntry, app.cfg.recordKey),
+                   (p.pauseKeyEntry, app.cfg.pauseKey)]:
+    e.setText(cstring(key))
+    e.setPlaceholderText("none")
+  box.row("Start/stop recording shortcut", p.recordKeyEntry)
+  box.row("Pause/resume recording shortcut", p.pauseKeyEntry)
+
+  let keyHint = newLabel("Shortcuts use GTK syntax, e.g. <Control><Shift>r. " &
+                         "They work while this window has focus.")
+  keyHint.setXalign(0)
+  keyHint.setWrap(true)
+  keyHint.setOpacity(0.7)
+  box.append(keyHint)
+
   let close = newButton("Close")
   close.setHalign(Align.`end`)
   close.connect("clicked", onPrefsClose, p)
@@ -503,7 +662,10 @@ proc onActSave(a: gio.SimpleAction; v: glib.Variant) =
 proc onActSaveAs(a: gio.SimpleAction; v: glib.Variant) =
   if not app.shot.isEmpty: saveAs()
 proc onActPrefs(a: gio.SimpleAction; v: glib.Variant) = showPrefs()
-proc onActQuit(a: gio.SimpleAction; v: glib.Variant) = gtk4.destroy(app.win)
+proc onActQuit(a: gio.SimpleAction; v: glib.Variant) = app.win.close
+proc onActRecord(a: gio.SimpleAction; v: glib.Variant) =
+  if app.recActive: stopRecording() else: takeShot(record = true)
+proc onActPause(a: gio.SimpleAction; v: glib.Variant) = togglePause()
 
 proc addAccels(application: Application) =
   ## gintro's connect macro needs a literal handler symbol, so no loop here.
@@ -532,17 +694,38 @@ proc addAccels(application: Application) =
   act.connect("activate", onActQuit)
   ga.addAction(act)
   application.setAccelsForAction("app.quit", "<Control>q")
+  act = newSimpleAction("record")
+  act.connect("activate", onActRecord)
+  ga.addAction(act)
+  act = newSimpleAction("pause")
+  act.connect("activate", onActPause)
+  ga.addAction(act)
+  applyRecordKeys(application)
 
 proc onNew(b: Button) = takeShot()
 proc onCopy(b: Button) = copyShot()
 proc onSave(b: Button) = saveShot(timestampedPath(app.cfg))
 proc onSaveAs(b: Button) = saveAs()
 proc onPrefs(b: Button) = showPrefs()
+proc onRecord(b: Button) = takeShot(record = true)
+proc onPauseClicked(b: Button) = togglePause()
+proc onStopClicked(b: Button) = stopRecording()
+
+proc onWinClose(w: ApplicationWindow): bool =
+  ## wf-recorder would outlive us and keep recording; save what we have.
+  stopRecording()
+  if app.encoder != nil:
+    discard app.encoder.waitForExit()
+    app.encoder.close()
+    app.rec.cleanup()
+  false
 
 const Css = """
 .mode-button { padding: 14px 8px; }
 .settings-row { padding: 10px 12px; }
 .section-label { font-weight: bold; }
+.rec-time { font-size: 36px; font-weight: bold; font-feature-settings: "tnum"; }
+.rec-button { font-size: 20px; padding: 20px 28px; }
 """
 
 proc modeButton(icon, label: string): ToggleButton =
@@ -585,6 +768,9 @@ proc buildUi(application: Application) =
   takeBtn.addCssClass("suggested-action")
   takeBtn.connect("clicked", onNew)
   header.packStart(takeBtn)
+  let recBtn = newButton("Record")
+  recBtn.connect("clicked", onRecord)
+  header.packStart(recBtn)
   let prefsBtn = newButtonFromIconName("open-menu-symbolic")
   prefsBtn.setTooltipText("Preferences")
   prefsBtn.connect("clicked", onPrefs)
@@ -672,7 +858,29 @@ proc buildUi(application: Application) =
   app.status.setOpacity(0.7)
   body.append(app.status)
 
-  app.win.setChild(body)
+  let recPage = newBox(Orientation.vertical, 18)
+  recPage.setValign(Align.center)
+  recPage.setMarginStart(24); recPage.setMarginEnd(24)
+  app.recTime = newLabel("00:00")
+  app.recTime.addCssClass("rec-time")
+  recPage.append(app.recTime)
+  app.pauseBtn = newButton("Pause")
+  app.pauseBtn.connect("clicked", onPauseClicked)
+  let stopBtn = newButton("Stop")
+  stopBtn.addCssClass("destructive-action")
+  stopBtn.connect("clicked", onStopClicked)
+  for b in [app.pauseBtn, stopBtn]:
+    b.addCssClass("rec-button")
+    recPage.append(b)
+  app.recHint = newLabel("")
+  app.recHint.setOpacity(0.7)
+  recPage.append(app.recHint)
+
+  app.stack = newStack()
+  discard app.stack.addNamed(body, "main")
+  discard app.stack.addNamed(recPage, "rec")
+  app.win.setChild(app.stack)
+  app.win.connect("close-request", onWinClose)
   app.win.present
 
 # --- entry point -----------------------------------------------------------

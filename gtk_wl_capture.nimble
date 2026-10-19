@@ -33,6 +33,7 @@ before build:
 
 task test, "run the checks":
   exec "nim c -r --hints:off tests/tgeometry.nim"
+  exec "nim c -r --hints:off tests/trecord.nim"
 
 # Called "stage", not "install": `nimble install` is a built-in command and
 # would shadow a task of that name. Honours DESTDIR and PREFIX, so the deb and

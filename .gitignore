@@ -4,6 +4,7 @@ src/protocols/
 # build artifacts
 /gtk-wl-capture
 /tests/tgeometry
+/tests/trecord
 nimcache/
 
 # packages

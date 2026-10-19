@@ -17,6 +17,18 @@ exiting.
     gtk-wl-capture              open the window
     gtk-wl-capture --shot FILE  capture every output to FILE and exit
 
+## Recording
+
+**Record** in the header bar records the chosen area - Screen records the
+output the window is on, Selection records the rectangle you drag. While
+recording the window shows a big Pause/Resume and Stop. Format (mp4, webm,
+mkv, gif) and frames per second are in Preferences, as are the two
+shortcuts: `Ctrl+R` start/stop and `Ctrl+P` pause/resume by default (they
+work while the window has focus). Videos land in the save folder.
+
+Needs `wf-recorder` and `ffmpeg`, so wlroots-family compositors only - there
+is no portal fallback for video yet.
+
 Shortcuts: `Ctrl+N` capture, `Ctrl+C` copy, `Ctrl+S` save, `Ctrl+Shift+S` save
 as, `Ctrl+,` preferences, `Ctrl+Q` quit, `Esc` cancels a selection.
 
@@ -36,7 +48,8 @@ Needs Nim (>= 2.0) with nimble, GTK 4, and the Wayland client library plus
     nimble build      # generates the protocol glue on first run
     ./gtk-wl-capture
 
-Optional but recommended at runtime: `wl-clipboard`.
+Optional but recommended at runtime: `wl-clipboard`, and `wf-recorder` plus
+`ffmpeg` for recording.
 
 Tests:
 
